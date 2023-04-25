@@ -1,6 +1,19 @@
 // Lucas Black
 // Swamp cooler system
+
+// Servo library
 #include <Servo.h>
+
+// RTC library
+#include "Wire.h"
+#include "RTClib.h"
+
+#define RDA 0x80
+#define TBE 0x20
+
+// RTC module
+RTC_DS1307 rtc;
+char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
 
 // servo
 Servo myservo;
@@ -14,6 +27,66 @@ int fan_enable = 5;
 int fan_input1 = 5;
 int fan_input2 = 4;
 
+// Define UART Register Pointers
+volatile unsigned char *myUCSR0A = (unsigned char *)0x00C0;
+volatile unsigned char *myUCSR0B = (unsigned char *)0x00C1;
+volatile unsigned char *myUCSR0C = (unsigned char *)0x00C2;
+volatile unsigned int  *myUBRR0  = (unsigned int *) 0x00C4;
+volatile unsigned char *myUDR0   = (unsigned char *)0x00C6;
+
+void U0init(int U0baud)
+{
+ unsigned long FCPU = 16000000;
+ unsigned int tbaud;
+ tbaud = (FCPU / 16 / U0baud - 1);
+ // Same as (FCPU / (16 * U0baud)) - 1;
+ *myUCSR0A = 0x20;
+ *myUCSR0B = 0x18;
+ *myUCSR0C = 0x06;
+ *myUBRR0  = tbaud;
+}
+
+unsigned char U0kbhit()
+{
+  return *myUCSR0A & RDA;
+}
+
+unsigned char U0getchar()
+{
+  return *myUDR0;
+}
+
+void U0putchar(unsigned char U0pdata)
+{
+  while((*myUCSR0A & TBE)==0);
+  *myUDR0 = U0pdata;
+}
+
+void serialPrintInt(unsigned int input)
+{
+  // get order of magnitude
+  unsigned int copy = 0, magnitude = 1;
+  while (input > 0) {
+    copy += (input % 10) * magnitude;
+    magnitude *= 10;
+    input /= 10;
+  }
+  // goes too high
+  magnitude /= 10;
+
+  while (magnitude > 0) {
+    // print highest order digit
+    U0putchar(copy / magnitude + '0');
+    // grab lower order digits
+    copy %= magnitude;
+    // decrease magnitude
+    magnitude /= 10;
+  }
+
+  // end with new line
+  U0putchar('\n');
+}
+
 // Define Timer Register Pointers
 volatile unsigned char *myTCCR1A = (unsigned char *) 0x80;
 volatile unsigned char *myTCCR1B = (unsigned char *) 0x81;
@@ -22,40 +95,36 @@ volatile unsigned char *myTIMSK1 = (unsigned char *) 0x6F;
 volatile unsigned int  *myTCNT1  = (unsigned  int *) 0x84;
 volatile unsigned char *myTIFR1 =  (unsigned char *) 0x36;
 
+// todo: modify this
+void timerDelay(double period)
+{
+  // double period = 1.0/(double)freq;
+  // 50% duty cycle
+  double half_period = period/ 2.0f;
+  // clock period def
+  double clk_period = 0.0000000625;
+  // calc ticks
+  unsigned int ticks = half_period / clk_period;
+  // stop the timer
+  *myTCCR1B &= 0xF8;
+  // set the counts
+  *myTCNT1 = (unsigned int) (65536 - ticks);
+  // start the timer
+  *myTCCR1B |= 0b00000011;
+  // wait for overflow
+  while((*myTIFR1 & 0x01)==0); // 0b 0000 0000
+  // stop the timer
+  *myTCCR1B &= 0xF8;   // 0b 0000 0000
+  // reset TOV           
+  *myTIFR1 |= 0x01;
+}
+
+
 // Define ADC Register pointers
 volatile unsigned char* my_ADMUX = (unsigned char*) 0x7C;
 volatile unsigned char* my_ADCSRB = (unsigned char*) 0x7B;
 volatile unsigned char* my_ADCSRA = (unsigned char*) 0x7A;
 volatile unsigned int* my_ADC_DATA = (unsigned int*) 0x78;
-
-// Define Port B Register Pointers
-volatile unsigned char* port_b = (unsigned char*) 0x25; 
-volatile unsigned char* ddr_b  = (unsigned char*) 0x24;
-// Define Port E Register Pointers
-volatile unsigned char* port_e = (unsigned char*) 0x2E; 
-volatile unsigned char* ddr_e  = (unsigned char*) 0x2D;
-// Define Port G Register Pointers
-volatile unsigned char* port_g = (unsigned char*) 0x34; 
-volatile unsigned char* ddr_g  = (unsigned char*) 0x33;
-
-// allows any port/pin to be set as output
-void set_port_as_output(volatile unsigned char* ddr, unsigned char pin_num)
-{
-  *ddr |= 0x01 << pin_num;
-}
-
-// allows any port/pin to be written to
-void write_port(volatile unsigned char* port, unsigned char pin_num, unsigned char state)
-{
-  if(state == 0)
-  {
-    *port &= ~(0x01 << pin_num);
-  }
-  else
-  {
-    *port |= 0x01 << pin_num;
-  }
-}
 
 void adc_init()
 {
@@ -98,30 +167,57 @@ unsigned int adc_read(unsigned char adc_channel_num)
   return *my_ADC_DATA;
 }
 
-void timerDelay(unsigned int freq)
+// Define Port B Register Pointers
+volatile unsigned char* port_b = (unsigned char*) 0x25; 
+volatile unsigned char* ddr_b  = (unsigned char*) 0x24;
+// Define Port E Register Pointers
+volatile unsigned char* port_e = (unsigned char*) 0x2E; 
+volatile unsigned char* ddr_e  = (unsigned char*) 0x2D;
+// Define Port G Register Pointers
+volatile unsigned char* port_g = (unsigned char*) 0x34; 
+volatile unsigned char* ddr_g  = (unsigned char*) 0x33;
+
+// allows any port/pin to be set as output
+void set_port_as_output(volatile unsigned char* ddr, unsigned char pin_num)
 {
-  double period = 1.0/(double)freq;
-  // 50% duty cycle
-  double half_period = period/ 2.0f;
-  // clock period def
-  double clk_period = 0.0000000625;
-  // calc ticks
-  unsigned int ticks = half_period / clk_period;
-  // stop the timer
-  *myTCCR1B &= 0xF8;
-  // set the counts
-  *myTCNT1 = (unsigned int) (65536 - ticks);
-  // start the timer
-  *myTCCR1B |= 0b00000011;
-  // wait for overflow
-  while((*myTIFR1 & 0x01)==0); // 0b 0000 0000
-  // stop the timer
-  *myTCCR1B &= 0xF8;   // 0b 0000 0000
-  // reset TOV           
-  *myTIFR1 |= 0x01;
+  *ddr |= 0x01 << pin_num;
+}
+
+// allows any port/pin to be written to
+void write_port(volatile unsigned char* port, unsigned char pin_num, unsigned char state)
+{
+  if(state == 0)
+  {
+    *port &= ~(0x01 << pin_num);
+  }
+  else
+  {
+    *port |= 0x01 << pin_num;
+  }
 }
 
 void setup() {
+  // For RTC...
+  Wire.begin();
+  // setup the UART
+  U0init(9600);
+
+  while (!rtc.begin()) {
+    Serial.println("Couldn't find RTC");
+    Serial.flush();
+  }
+
+  if (!rtc.isrunning()) {
+    Serial.println("RTC is NOT running, let's set the time!");
+    // When time needs to be set on a new device, or after a power loss, the
+    // following line sets the RTC to the date & time this sketch was compiled
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  }
+
+  // When time needs to be re-set on a previously configured device, the
+  // following line sets the RTC to the date & time this sketch was compiled
+  rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+
   // set servo output
   myservo.attach(servo_pin);
 
@@ -150,6 +246,13 @@ void loop() {
   // spin motor in one direction
   write_port(port_e, fan_input1, LOW);
   write_port(port_e, fan_input2, HIGH);
-  // delay
-  timerDelay(1);
+
+  DateTime now = rtc.now();
+
+  serialPrintInt(now.year());
+  serialPrintInt(now.month());
+  serialPrintInt(now.day());
+
+  // delay (change this)
+  delay(5000);
 }
