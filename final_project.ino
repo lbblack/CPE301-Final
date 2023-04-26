@@ -11,7 +11,17 @@
 // Humidity/temperature library
 #include <SimpleDHT.h>
 
+// LCD library
+#include <LiquidCrystal.h>
+
+// initialize the LCD
+const int rs = 30, en = 31, d4 = 22;
+const int d5 = 23, d6 = 26, d7 = 27;
+LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
+
 // initialize DHT11
+byte sys_temperature = 0;
+byte sys_humidity    = 0;
 int pinDHT11 = 6;
 SimpleDHT11 dht11(pinDHT11);
 
@@ -70,7 +80,7 @@ void U0putchar(unsigned char U0pdata)
   *myUDR0 = U0pdata;
 }
 
-void serialPrintInt(unsigned int input, bool newline)
+void serialPrintInt(unsigned int input)
 {
   // get order of magnitude
   unsigned int copy = 0, magnitude = 1;
@@ -90,14 +100,9 @@ void serialPrintInt(unsigned int input, bool newline)
     // decrease magnitude
     magnitude /= 10;
   }
-
-  if (newline) {
-    // end with new line
-    U0putchar('\n');
-  }
 }
 
-void serialPrint(const char *str, bool newline)
+void serialPrint(const char *str)
 {
   int i = 0;
   while (str[i] != '\0') {
@@ -105,29 +110,25 @@ void serialPrint(const char *str, bool newline)
     U0putchar(str[i]);
     i++;
   }
-  
-  if (newline) {
-    // end with new line
-    U0putchar('\n');
-  }
 }
 
 void serialPrintDateTime(RTC_DS1307 &rtc)
 {
   DateTime now = rtc.now();
-  serialPrintInt(now.month(), 0);
-  serialPrint("/", 0);
-  serialPrintInt(now.day(), 0);
-  serialPrint("/", 0);
-  serialPrintInt(now.year(), 0);
-  serialPrint(" (", 0);
-  serialPrint(daysOfTheWeek[now.dayOfTheWeek()], 0);
-  serialPrint(") ", 0);
-  serialPrintInt(now.hour(), 0);
-  serialPrint(":", 0);
-  serialPrintInt(now.minute(), 0);
-  serialPrint(":", 0);
-  serialPrintInt(now.second(), 1);
+  serialPrintInt(now.month());
+  serialPrint("/");
+  serialPrintInt(now.day());
+  serialPrint("/");
+  serialPrintInt(now.year());
+  serialPrint(" (");
+  serialPrint(daysOfTheWeek[now.dayOfTheWeek()]);
+  serialPrint(") ");
+  serialPrintInt(now.hour());
+  serialPrint(":");
+  serialPrintInt(now.minute());
+  serialPrint(":");
+  serialPrintInt(now.second());
+  U0putchar('\n');
 }
 
 // Define Timer Register Pointers
@@ -143,11 +144,11 @@ void timerDelay(double period)
 {
   // double period = 1.0/(double)freq;
   // 50% duty cycle
-  double half_period = period/ 2.0f;
+  // double half_period = period/ 2.0f;
   // clock period def
   double clk_period = 0.0000000625;
   // calc ticks
-  unsigned int ticks = half_period / clk_period;
+  unsigned int ticks = period / clk_period;
   // stop the timer
   *myTCCR1B &= 0xF8;
   // set the counts
@@ -240,6 +241,9 @@ void write_port(volatile unsigned char* port, unsigned char pin_num, unsigned ch
 }
 
 void setup() {
+  // set columns and rows
+  lcd.begin(16, 2);
+  
   initialize_serial_and_rtc();
   initialize_fan();
   initialize_servo();
@@ -296,8 +300,9 @@ void read_pot_write_servo(Servo &myservo) {
 
   if (prev_potval != potval) {
     // print change to vent position
-    serialPrint("Vent position: ", 0);
-    serialPrintInt(potval, 1);
+    serialPrint("Vent position: ");
+    serialPrintInt(potval);
+    U0putchar('\n');
   }
 }
 
@@ -310,24 +315,28 @@ void turn_fan_on()
   write_port(port_e, fan_input2, HIGH);
 }
 
-void read_DHT11()
+void read_DHT11(byte *temperature, byte *humidity)
 {
-  // read without samples.
-  byte temperature = 0;
-  byte humidity = 0;
+  byte temp = 0, hum = 0;
   int err = SimpleDHTErrSuccess;
-  if ((err = dht11.read(&temperature, &humidity, NULL)) != SimpleDHTErrSuccess) {
-    serialPrint("Read DHT11 failed, err=", 0);
-    serialPrintInt(SimpleDHTErrCode(err), 0);
-    serialPrint(",", 0);
-    serialPrintInt(SimpleDHTErrDuration(err), 1);
+  if ((err = dht11.read(&temp, &hum, NULL)) != SimpleDHTErrSuccess) {
     return;
   }
-  
-  serialPrintInt((int)temperature, 0);
-  serialPrint(" C, ", 0); 
-  serialPrintInt((int)humidity, 0);
-  serialPrint("% H", 1);
+  *temperature = temp;
+  *humidity = hum;
+}
+
+void write_to_lcd()
+{
+  read_DHT11(&sys_temperature, &sys_humidity);
+  lcd.setCursor(0, 0);
+  lcd.print("Temp: ");
+  lcd.print(sys_temperature);
+  lcd.print(" C");
+  lcd.setCursor(0, 1);
+  lcd.print("Humidity: ");
+  lcd.print(sys_humidity);
+  lcd.print("%");
 }
 
 void loop() {
@@ -335,7 +344,7 @@ void loop() {
 
   // turn_fan_on();
 
-  read_DHT11();
+  write_to_lcd();
   // delay (change this)
   delay(1500);
 }
