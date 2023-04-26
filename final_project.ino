@@ -21,6 +21,7 @@ int servo_pin = 5;
 
 // potentiometer pin
 int potpin = 0;
+unsigned int potval = 0, prev_potval = 0;
 
 // fan motor
 int fan_enable = 5;
@@ -62,7 +63,7 @@ void U0putchar(unsigned char U0pdata)
   *myUDR0 = U0pdata;
 }
 
-void serialPrintInt(unsigned int input)
+void serialPrintInt(unsigned int input, bool newline)
 {
   // get order of magnitude
   unsigned int copy = 0, magnitude = 1;
@@ -83,8 +84,43 @@ void serialPrintInt(unsigned int input)
     magnitude /= 10;
   }
 
-  // end with new line
-  U0putchar('\n');
+  if (newline) {
+    // end with new line
+    U0putchar('\n');
+  }
+}
+
+void serialPrint(const char *str, bool newline)
+{
+  int i = 0;
+  while (str[i] != '\0') {
+    // print each character in string
+    U0putchar(str[i]);
+    i++;
+  }
+  
+  if (newline) {
+    // end with new line
+    U0putchar('\n');
+  }
+}
+
+void serialPrintDateTime(RTC_DS1307 &rtc)
+{
+  DateTime now = rtc.now();
+  serialPrintInt(now.month(), 0);
+  serialPrint("/", 0);
+  serialPrintInt(now.day(), 0);
+  serialPrint("/", 0);
+  serialPrintInt(now.year(), 0);
+  serialPrint(" (", 0);
+  serialPrint(daysOfTheWeek[now.dayOfTheWeek()], 0);
+  serialPrint(") ", 0);
+  serialPrintInt(now.hour(), 0);
+  serialPrint(":", 0);
+  serialPrintInt(now.minute(), 0);
+  serialPrint(":", 0);
+  serialPrintInt(now.second(), 1);
 }
 
 // Define Timer Register Pointers
@@ -208,14 +244,10 @@ void setup() {
   }
 
   if (!rtc.isrunning()) {
-    Serial.println("RTC is NOT running, let's set the time!");
-    // When time needs to be set on a new device, or after a power loss, the
-    // following line sets the RTC to the date & time this sketch was compiled
-    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    Serial.println("RTC is NOT running!");
   }
 
-  // When time needs to be re-set on a previously configured device, the
-  // following line sets the RTC to the date & time this sketch was compiled
+  // set RTC time to current time of compliation
   rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
 
   // set servo output
@@ -232,14 +264,30 @@ void setup() {
 
   // setup the ADC
   adc_init();
+
+  // read potentiometer from A0
+  potval = adc_read(0);
+  // map value from potentiometer to range of servo values
+  potval = map(potval, 0, 1023, 0, 180);
+  myservo.write(potval);
+  prev_potval = potval;
 }
 
 void loop() {
+  prev_potval = potval;
   // read potentiometer from A0
-  unsigned int val = adc_read(0);
+  potval = adc_read(0);
   // map value from potentiometer to range of servo values
-  val = map(val, 0, 1023, 0, 180);
-  myservo.write(val);
+  potval = map(potval, 0, 1023, 0, 180);
+  myservo.write(potval);
+
+  if (prev_potval != potval) {
+    // print change to vent position
+    serialPrint("Vent position: ", 0);
+    serialPrintInt(potval, 1);
+
+    serialPrintDateTime(rtc);
+  }
 
   // set motor speed to max
   write_port(port_g, fan_enable, HIGH);
@@ -247,12 +295,6 @@ void loop() {
   write_port(port_e, fan_input1, LOW);
   write_port(port_e, fan_input2, HIGH);
 
-  DateTime now = rtc.now();
-
-  serialPrintInt(now.year());
-  serialPrintInt(now.month());
-  serialPrintInt(now.day());
-
   // delay (change this)
-  delay(5000);
+  delay(100);
 }
