@@ -8,6 +8,13 @@
 #include "Wire.h"
 #include "RTClib.h"
 
+// Humidity/temperature library
+#include <SimpleDHT.h>
+
+// initialize DHT11
+int pinDHT11 = 6;
+SimpleDHT11 dht11(pinDHT11);
+
 #define RDA 0x80
 #define TBE 0x20
 
@@ -233,26 +240,26 @@ void write_port(volatile unsigned char* port, unsigned char pin_num, unsigned ch
 }
 
 void setup() {
+  initialize_serial_and_rtc();
+  initialize_fan();
+  initialize_servo();
+}
+
+void initialize_serial_and_rtc()
+{
   // For RTC...
   Wire.begin();
   // setup the UART
   U0init(9600);
 
-  while (!rtc.begin()) {
-    Serial.println("Couldn't find RTC");
-    Serial.flush();
-  }
-
-  if (!rtc.isrunning()) {
-    Serial.println("RTC is NOT running!");
-  }
+  while (!rtc.begin()) { }
 
   // set RTC time to current time of compliation
   rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+}
 
-  // set servo output
-  myservo.attach(servo_pin);
-
+void initialize_fan()
+{
   // set fan output pins
   set_port_as_output(ddr_g, fan_enable);
   set_port_as_output(ddr_e, fan_input1);
@@ -261,22 +268,28 @@ void setup() {
   // initialize fan inputs
   write_port(port_e, fan_input1, LOW);
   write_port(port_e, fan_input2, LOW);
+}
+
+void initialize_servo()
+{
+  // set servo output
+  myservo.attach(servo_pin);
 
   // setup the ADC
   adc_init();
 
   // read potentiometer from A0
-  potval = adc_read(0);
+  potval = adc_read(potpin);
   // map value from potentiometer to range of servo values
   potval = map(potval, 0, 1023, 0, 180);
   myservo.write(potval);
   prev_potval = potval;
 }
 
-void loop() {
+void read_pot_write_servo(Servo &myservo) {
   prev_potval = potval;
   // read potentiometer from A0
-  potval = adc_read(0);
+  potval = adc_read(potpin);
   // map value from potentiometer to range of servo values
   potval = map(potval, 0, 1023, 0, 180);
   myservo.write(potval);
@@ -285,16 +298,44 @@ void loop() {
     // print change to vent position
     serialPrint("Vent position: ", 0);
     serialPrintInt(potval, 1);
-
-    serialPrintDateTime(rtc);
   }
+}
 
+void turn_fan_on()
+{
   // set motor speed to max
   write_port(port_g, fan_enable, HIGH);
   // spin motor in one direction
   write_port(port_e, fan_input1, LOW);
   write_port(port_e, fan_input2, HIGH);
+}
 
+void read_DHT11()
+{
+  // read without samples.
+  byte temperature = 0;
+  byte humidity = 0;
+  int err = SimpleDHTErrSuccess;
+  if ((err = dht11.read(&temperature, &humidity, NULL)) != SimpleDHTErrSuccess) {
+    serialPrint("Read DHT11 failed, err=", 0);
+    serialPrintInt(SimpleDHTErrCode(err), 0);
+    serialPrint(",", 0);
+    serialPrintInt(SimpleDHTErrDuration(err), 1);
+    return;
+  }
+  
+  serialPrintInt((int)temperature, 0);
+  serialPrint(" C, ", 0); 
+  serialPrintInt((int)humidity, 0);
+  serialPrint("% H", 1);
+}
+
+void loop() {
+  read_pot_write_servo(myservo);
+
+  // turn_fan_on();
+
+  read_DHT11();
   // delay (change this)
-  delay(100);
+  delay(1500);
 }
