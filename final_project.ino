@@ -37,7 +37,7 @@ Servo myservo;
 int servo_pin = 5; // digital pin 5 for Servo object initialisation
 
 // potentiometer pin
-int potpin = 0; // A0
+int potpin = 8; // A8
 unsigned int potval = 0, prev_potval = 0;
 
 // fan motor
@@ -52,8 +52,8 @@ int blue_led = 6;   // PH6 (RUNNING)
 int red_led = 4;    // PB4 (ERROR)
 
 // push buttons
-int push_reset = 5; // PB5 (Reset button)
-int push_starp = 6; // PB6 (On/off button)
+int push_reset = 3; // PC3 (Reset button)
+int push_starp = 2; // PC2 (On/off button)
 
 // variables for button input
 bool IS_RESET = false;
@@ -96,6 +96,10 @@ void U0putchar(unsigned char U0pdata)
 
 void serialPrintInt(unsigned int input)
 {
+  if (input == 0) {
+    U0putchar('0');
+    return;
+  }
   // get order of magnitude
   unsigned int copy = 0, magnitude = 1;
   while (input > 0) {
@@ -201,7 +205,7 @@ void adc_init()
   *my_ADMUX  &= 0b11100000; // clear bit 4-0 to 0 to reset the channel and gain bits
 }
 
-unsigned int adc_read(unsigned char adc_channel_num)
+unsigned int adc_read(unsigned char adc_channel_num, bool prescale)
 {
   // clear the channel selection bits (MUX 4:0)
   *my_ADMUX  &= 0b11100000;
@@ -216,9 +220,14 @@ unsigned int adc_read(unsigned char adc_channel_num)
     *my_ADCSRB |= 0b00001000;
   }
   // set the channel selection bits
-  *my_ADMUX  += adc_channel_num;
+  *my_ADMUX  |= adc_channel_num;
   // set bit 6 of ADCSRA to 1 to start a conversion
-  *my_ADCSRA |= 0x40;
+  if (prescale) {
+    *my_ADCSRA |= 0x43;
+  } else {
+    *my_ADCSRA |= 0x40;
+  }
+  
   // wait for the conversion to complete
   while((*my_ADCSRA & 0x40) != 0);
   // return the result in the ADC data register
@@ -228,6 +237,9 @@ unsigned int adc_read(unsigned char adc_channel_num)
 // Define Port B Register Pointers
 volatile unsigned char* port_b = (unsigned char*) 0x25;
 volatile unsigned char* ddr_b  = (unsigned char*) 0x24;
+// Define Port B Register Pointers
+volatile unsigned char* port_c = (unsigned char*) 0x28;
+volatile unsigned char* ddr_c  = (unsigned char*) 0x27;
 // Define Port E Register Pointers
 volatile unsigned char* port_e = (unsigned char*) 0x2E;
 volatile unsigned char* ddr_e  = (unsigned char*) 0x2D;
@@ -259,7 +271,7 @@ void write_port(volatile unsigned char* port, unsigned char pin_num, unsigned ch
 
 volatile unsigned char read_port(volatile unsigned char* port, unsigned char pin_num)
 {
-  return *port &= (0x01 << pin_num);
+  return *port & (0x01 << pin_num);
 }
 
 // setup the RTC module
@@ -295,39 +307,33 @@ void initialize_servo()
 {
   // set servo output
   myservo.attach(servo_pin);
-
-  // setup the ADC
-  adc_init();
-
-  // read potentiometer from A0
-  potval = adc_read(potpin);
-  // map value from potentiometer to range of servo values
-  potval = map(potval, 0, 1023, 0, 180);
-  myservo.write(potval);
-  prev_potval = potval;
 }
 
-void initialize_leds_buttons()
+void initialize_leds()
 {
   // set up led pins as outputs
   set_port_as_output(ddr_h, yellow_led);
   set_port_as_output(ddr_h, green_led);
   set_port_as_output(ddr_h, blue_led);
   set_port_as_output(ddr_b, red_led);
+}
 
+void initialize_buttons()
+{
   // set up push buttons
-  set_port_as_output(ddr_b, push_reset);
-  set_port_as_output(ddr_b, push_starp);
+  *ddr_b &= 0b10011111;
 }
 
 // read the potentiometer and write the value to the servo
 void read_pot_write_servo(Servo &myservo) {
   prev_potval = potval;
   // read potentiometer from A0
-  potval = adc_read(potpin);
+  potval = adc_read(potpin, false);
   // map value from potentiometer to range of servo values
-  potval = map(potval, 0, 1023, 0, 180);
+  potval = max(0, potval);
+  potval = map(potval, 0, 930, 0, 179);
   myservo.write(potval);
+  delay(15);
 
   if (prev_potval != potval) {
     // print change to vent position
@@ -338,7 +344,7 @@ void read_pot_write_servo(Servo &myservo) {
 }
 
 unsigned int read_water_level() {
-  return adc_read(A1);
+  return adc_read(1, true);
 }
 
 void turn_fan_on()
@@ -379,10 +385,18 @@ void write_to_lcd()
 void write_led(int i)
 {
   // reset LEDs
-  write_port(port_h, yellow_led, LOW);
-  write_port(port_h, green_led, LOW);
-  write_port(port_h, blue_led, LOW);
-  write_port(port_b, red_led, LOW);
+  if (i != 0) {
+    write_port(port_h, yellow_led, LOW);
+  }
+  if (i != 1) {
+    write_port(port_h, green_led, LOW);
+  }
+  if (i != 2) {
+    write_port(port_h, blue_led, LOW);
+  }
+  if (i != 3) {
+    write_port(port_b, red_led, LOW);
+  }
 
   // enable selected LED
   switch(i) {
@@ -408,35 +422,48 @@ void setup() {
   initialize_serial_and_rtc();
   initialize_fan();
   initialize_servo();
-  initialize_leds_buttons();
+  initialize_leds();
+  initialize_buttons();
+
+  // setup the ADC
+  adc_init();
+
+  *ddr_b &= 0b10011111;
+  *port_b |= 0b01100000;
 
   PCICR |= B00000001; // Enable interrupts on PB
-  PCMSK0 |= B00011000; // Trigger interrupts on pins D11 and D12
+  PCMSK0 |= B110000; // Trigger interrupts on pins D11 and D12
 }
 
+unsigned int presses = 0;
 void loop() {
-  read_pot_write_servo(myservo);
-
-  // serialPrintInt(read_water_level());
+  
   // U0putchar('\n');
 
-  Serial.println(analogRead(A1));
+  // Serial.println(adc_read(2));
+  // Serial.println(analogRead(1));
 
   // turn_fan_on();
 
-  write_to_lcd();
-  write_led(0);
+  // write_to_lcd();
+  // write_led(3);
+
+  read_pot_write_servo(myservo);
+  // delay(20);
+  serialPrintInt(read_water_level());
+  U0putchar('\n');
+  // Serial.println(presses);
   
   // delay (change this)
   delay(1000);
 }
 
-// Port B ISR
 ISR(PCINT0_vect)
 {
-  if (read_port(port_b, push_starp)) {
-    Serial.println("System start");    
+  if (presses % 2 == 0) {
+    IS_STARP = 0;
   } else {
-    Serial.println("System not start");
+    IS_STARP = 1;
   }
+  presses++;
 }
