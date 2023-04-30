@@ -14,7 +14,7 @@
 // LCD library
 #include <LiquidCrystal.h>
 
-// initialize the LCD
+// initialize the LCD (digital pins)
 const int rs = 30, en = 31, d4 = 22;
 const int d5 = 23, d6 = 26, d7 = 27;
 LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
@@ -22,7 +22,7 @@ LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
 // initialize DHT11
 byte sys_temperature = 0;
 byte sys_humidity    = 0;
-int pinDHT11 = 6;
+int pinDHT11 = 6; // digital pin 6 for object initialisation
 SimpleDHT11 dht11(pinDHT11);
 
 #define RDA 0x80
@@ -34,16 +34,30 @@ char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursd
 
 // servo
 Servo myservo;
-int servo_pin = 5;
+int servo_pin = 5; // digital pin 5 for Servo object initialisation
 
 // potentiometer pin
-int potpin = 0;
+int potpin = 0; // A0
 unsigned int potval = 0, prev_potval = 0;
 
 // fan motor
-int fan_enable = 5;
-int fan_input1 = 5;
-int fan_input2 = 4;
+int fan_enable = 5; // PG5
+int fan_input1 = 5; // PE5
+int fan_input2 = 4; // PE4
+
+// led pins
+int yellow_led = 4; // PH4 (DISABLE)
+int green_led = 5;  // PH5 (IDLE)
+int blue_led = 6;   // PH6 (RUNNING)
+int red_led = 4;    // PB4 (ERROR)
+
+// push buttons
+int push_reset = 5; // PB5 (Reset button)
+int push_starp = 6; // PB6 (On/off button)
+
+// variables for button input
+bool IS_RESET = false;
+bool IS_STARP = false; // Start/stop
 
 // Define UART Register Pointers
 volatile unsigned char *myUCSR0A = (unsigned char *)0x00C0;
@@ -212,14 +226,17 @@ unsigned int adc_read(unsigned char adc_channel_num)
 }
 
 // Define Port B Register Pointers
-volatile unsigned char* port_b = (unsigned char*) 0x25; 
+volatile unsigned char* port_b = (unsigned char*) 0x25;
 volatile unsigned char* ddr_b  = (unsigned char*) 0x24;
 // Define Port E Register Pointers
-volatile unsigned char* port_e = (unsigned char*) 0x2E; 
+volatile unsigned char* port_e = (unsigned char*) 0x2E;
 volatile unsigned char* ddr_e  = (unsigned char*) 0x2D;
 // Define Port G Register Pointers
-volatile unsigned char* port_g = (unsigned char*) 0x34; 
+volatile unsigned char* port_g = (unsigned char*) 0x34;
 volatile unsigned char* ddr_g  = (unsigned char*) 0x33;
+// Define Port H Register Pointers
+volatile unsigned char* port_h = (unsigned char*) 0x102;
+volatile unsigned char* ddr_h  = (unsigned char*) 0x101;
 
 // allows any port/pin to be set as output
 void set_port_as_output(volatile unsigned char* ddr, unsigned char pin_num)
@@ -240,28 +257,27 @@ void write_port(volatile unsigned char* port, unsigned char pin_num, unsigned ch
   }
 }
 
-void setup() {
-  // set columns and rows
-  lcd.begin(16, 2);
-  
-  initialize_serial_and_rtc();
-  initialize_fan();
-  initialize_servo();
+volatile unsigned char read_port(volatile unsigned char* port, unsigned char pin_num)
+{
+  return *port &= (0x01 << pin_num);
 }
 
+// setup the RTC module
 void initialize_serial_and_rtc()
 {
-  // For RTC...
+  // Needed for RTC
   Wire.begin();
   // setup the UART
   U0init(9600);
 
+  // initialize RTC
   while (!rtc.begin()) { }
 
   // set RTC time to current time of compliation
   rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
 }
 
+// setup the fan
 void initialize_fan()
 {
   // set fan output pins
@@ -274,6 +290,7 @@ void initialize_fan()
   write_port(port_e, fan_input2, LOW);
 }
 
+// setup the servo
 void initialize_servo()
 {
   // set servo output
@@ -290,6 +307,20 @@ void initialize_servo()
   prev_potval = potval;
 }
 
+void initialize_leds_buttons()
+{
+  // set up led pins as outputs
+  set_port_as_output(ddr_h, yellow_led);
+  set_port_as_output(ddr_h, green_led);
+  set_port_as_output(ddr_h, blue_led);
+  set_port_as_output(ddr_b, red_led);
+
+  // set up push buttons
+  set_port_as_output(ddr_b, push_reset);
+  set_port_as_output(ddr_b, push_starp);
+}
+
+// read the potentiometer and write the value to the servo
 void read_pot_write_servo(Servo &myservo) {
   prev_potval = potval;
   // read potentiometer from A0
@@ -306,6 +337,10 @@ void read_pot_write_servo(Servo &myservo) {
   }
 }
 
+unsigned int read_water_level() {
+  return adc_read(A1);
+}
+
 void turn_fan_on()
 {
   // set motor speed to max
@@ -315,6 +350,7 @@ void turn_fan_on()
   write_port(port_e, fan_input2, HIGH);
 }
 
+// Read the temperature/humidity sensor
 void read_DHT11(byte *temperature, byte *humidity)
 {
   byte temp = 0, hum = 0;
@@ -326,6 +362,7 @@ void read_DHT11(byte *temperature, byte *humidity)
   *humidity = hum;
 }
 
+// Output current air temperature/humidity to LCD display
 void write_to_lcd()
 {
   read_DHT11(&sys_temperature, &sys_humidity);
@@ -339,12 +376,67 @@ void write_to_lcd()
   lcd.print("%");
 }
 
+void write_led(int i)
+{
+  // reset LEDs
+  write_port(port_h, yellow_led, LOW);
+  write_port(port_h, green_led, LOW);
+  write_port(port_h, blue_led, LOW);
+  write_port(port_b, red_led, LOW);
+
+  // enable selected LED
+  switch(i) {
+  case 0:
+    write_port(port_h, yellow_led, HIGH);
+    break;
+  case 1:
+    write_port(port_h, green_led, HIGH);
+    break;
+  case 2:
+    write_port(port_h, blue_led, HIGH);
+    break;
+  case 3:
+    write_port(port_b, red_led, HIGH);
+    break;
+  }
+}
+
+void setup() {
+  // set columns and rows
+  lcd.begin(16, 2);
+  
+  initialize_serial_and_rtc();
+  initialize_fan();
+  initialize_servo();
+  initialize_leds_buttons();
+
+  PCICR |= B00000001; // Enable interrupts on PB
+  PCMSK0 |= B00011000; // Trigger interrupts on pins D11 and D12
+}
+
 void loop() {
   read_pot_write_servo(myservo);
+
+  // serialPrintInt(read_water_level());
+  // U0putchar('\n');
+
+  Serial.println(analogRead(A1));
 
   // turn_fan_on();
 
   write_to_lcd();
+  write_led(0);
+  
   // delay (change this)
-  delay(1500);
+  delay(1000);
+}
+
+// Port B ISR
+ISR(PCINT0_vect)
+{
+  if (read_port(port_b, push_starp)) {
+    Serial.println("System start");    
+  } else {
+    Serial.println("System not start");
+  }
 }
