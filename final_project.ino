@@ -294,10 +294,10 @@ void initialize_fan()
   write_port(port_e, fan_input2, LOW);
 }
 
-// setup the servo
-void initialize_servo()
+// setup the stepper
+void initialize_stepper()
 {
-  // set servo output
+  // set stepper output
   stepper.setSpeed(200);
 }
 
@@ -324,7 +324,7 @@ void setup() {
   // setup all components
   initialize_serial_and_rtc();
   initialize_fan();
-  initialize_servo();
+  initialize_stepper();
   initialize_leds();
   initialize_buttons();
 
