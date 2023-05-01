@@ -459,7 +459,7 @@ void loop() {
   
   // update water sensor and temp/humidity
   if (state != "disabled") {
-    if ((button_timer - previous_DHT_timer) >= 10000) {
+    if ((button_timer - previous_DHT_timer) >= 60000) {
       read_DHT11(&sys_temperature, &sys_humidity);
       previous_DHT_timer = button_timer;
     }
