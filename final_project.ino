@@ -255,6 +255,7 @@ volatile bool begin_lag = 0;
 // for updating the water and DHT sensor
 unsigned long previous_DHT_timer = 0;
 unsigned long previous_water_timer = 0;
+unsigned long previous_LCD_timer = 0;
 unsigned long idle_timer = 0, previous_idle_timer = 0;
 
 // for keeping track of state
@@ -369,15 +370,29 @@ void loop() {
     serialPrint(" )");
     U0putchar('\n');
 
-    lcd.clear();
     if (prev_potval != potval) {
       // print change to vent position
       serialPrint("Vent position: ");
       serialPrintInt(map(potval, 0, 1024, 0, 180));
       U0putchar('\n');
     }
+
     // ensure no funky state transitions on error -> disabled
     if ((state == "disabled" || state == "idle") && previous_state == "error") {
+      SYSTEM_TOGGLE = 0;
+      lcd.clear();
+    } else if (state == "idle") {
+      lcd.clear();
+      write_data_to_lcd();
+    } else if (state == "running") {
+      lcd.clear();
+      write_data_to_lcd();
+    } else if (state == "error") {
+      lcd.clear();
+      write_error_to_lcd();      
+    }
+
+    if (state == "display" && previous_state == "idle") {
       SYSTEM_TOGGLE = 0;
     }
 
@@ -399,6 +414,7 @@ void loop() {
     // go back to disabled on stop
     if (SYSTEM_TOGGLE && (button_timer - previous_idle_timer > 200)) {
       state = "disabled";
+      lcd.clear();
       return;
     }
 
@@ -421,6 +437,7 @@ void loop() {
     // go to disabled on stop
     if (SYSTEM_TOGGLE) {
       state = "disabled";
+      lcd.clear();
       turn_fan_off();
     }
 
@@ -448,6 +465,7 @@ void loop() {
       return;
     } else if (SYSTEM_TOGGLE) {
       state = "disabled";
+      lcd.clear();
       return;
     }
   }
@@ -459,7 +477,7 @@ void loop() {
   
   // update water sensor and temp/humidity
   if (state != "disabled") {
-    if ((button_timer - previous_DHT_timer) >= 60000) {
+    if ((button_timer - previous_DHT_timer) >= 10000) {
       read_DHT11(&sys_temperature, &sys_humidity);
       previous_DHT_timer = button_timer;
     }
@@ -473,7 +491,10 @@ void loop() {
   // vent position should be adjustable in all positions except error and disabled
   // (according to state diagram and state descriptions)
   if (state == "running" || state == "idle") {
-    write_data_to_lcd();
+    if (button_timer - previous_LCD_timer >= 60000) {
+      write_data_to_lcd();
+      previous_LCD_timer = button_timer;
+    }
     read_pot_write_stepper(stepper);
   }
 }
