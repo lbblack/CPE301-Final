@@ -239,6 +239,11 @@ void write_port(volatile unsigned char* port, unsigned char pin_num, unsigned ch
   }
 }
 
+volatile unsigned char read_port(volatile unsigned char* port, unsigned char pin_num)
+{
+  return *port & (0x01 << pin_num);
+}
+
 /*    MAIN SETUP   */
 /*******************/
 
@@ -257,8 +262,8 @@ char *previous_state = "disabled";
 char *state = "disabled";
 
 // system constants
-unsigned int water_level = 0, water_threshold = 130;
-unsigned int temp_threshold = 75;
+unsigned int water_level = 0, water_threshold = 180;
+unsigned int temp_threshold = 72;
 
 // setup the RTC module
 void initialize_serial_and_rtc()
@@ -307,7 +312,7 @@ void initialize_leds()
 void initialize_buttons()
 {
   // set up push buttons
-  *ddr_b &= 0b10011111;
+  *ddr_b &= 0b11011111;
 }
 
 
@@ -327,12 +332,14 @@ void setup() {
 
   // ensure the fan starts as off
   turn_fan_off();
+  read_DHT11(&sys_temperature, &sys_humidity);
+  water_level = read_water_level();
 
-  *ddr_b &= 0b10011111; // enable pullup
-  *port_b |= 0b01100000;
+  *ddr_b &= 0b11011111; // enable pullup
+  *port_b |= 0b00100000;
 
   PCICR |= B00000001; // Enable interrupts on PB & PC
-  PCMSK0 |= B01100000; // Trigger interrupts on pins D11 and D12
+  PCMSK0 |= B00100000; // Trigger interrupts on pins D11 and D12
   EICRA |= B00000011; // Trigger on rising edge?
 }
 
@@ -367,12 +374,10 @@ void loop() {
       // print change to vent position
       serialPrint("Vent position: ");
       serialPrintInt(map(potval, 0, 1024, 0, 180));
-      serialPrint("°");
       U0putchar('\n');
     }
-
     // ensure no funky state transitions on error -> disabled
-    if (state == "disabled" && previous_state == "error") {
+    if ((state == "disabled" || state == "idle") && previous_state == "error") {
       SYSTEM_TOGGLE = 0;
     }
 
@@ -490,12 +495,10 @@ void read_pot_write_stepper(Stepper &stepper) {
   // map value from potentiometer to range of stepper values
   if (potval > prev_potval + 25) {
     stepper.step(potval - prev_potval);
-    prev_potval = potval;
   }
   
   if (potval + 25 < prev_potval) {
     stepper.step(-(prev_potval - potval));
-    prev_potval = potval;
   }
 }
 
