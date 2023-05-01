@@ -1,8 +1,10 @@
 // Lucas Black
 // Swamp cooler system
 
-// Servo library
-#include <Servo.h>
+// Stepper library
+#include <Stepper.h>
+const int stepsPerRevolution = 64;
+Stepper myStepper(stepsPerRevolution, 34, 38, 35, 39);
 
 // RTC library
 #include "Wire.h"
@@ -31,10 +33,6 @@ SimpleDHT11 dht11(pinDHT11);
 // RTC module
 RTC_DS1307 rtc;
 char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
-
-// servo
-Servo myservo;
-int servo_pin = 5; // digital pin 5 for Servo object initialisation
 
 // potentiometer pin
 int potpin = 8; // A8
@@ -303,7 +301,7 @@ void initialize_fan()
 void initialize_servo()
 {
   // set servo output
-  myservo.attach(servo_pin);
+  myStepper.setSpeed(200);
 }
 
 void initialize_leds()
@@ -360,6 +358,19 @@ volatile unsigned long button_timer, previous_button_timer;
 unsigned long idle_timer, previous_idle_timer;
 volatile bool begin_lag = 0;
 void loop() {
+  button_timer = millis();
+
+  if (!begin_lag) {
+    previous_button_timer = button_timer;
+  }
+
+  if (button_timer - previous_button_timer > 50) {
+    SYSTEM_TOGGLE = 1;
+    begin_lag = 0;
+  } else {
+    SYSTEM_TOGGLE = 0;
+  }
+
   // report timestamp and motor position
   if (previous_state != state) {
     serialPrintDateTime(rtc);
@@ -378,48 +389,14 @@ void loop() {
       U0putchar('\n');
     }
 
+    if (state == "disabled" && previous_state == "error") {
+      SYSTEM_TOGGLE = 0;      
+    } else if (state == "idle" && previous_state == "disabled") {
+      water_level = read_water_level();
+    }
+
     previous_state = state;
   }
-
-  button_timer = millis();
-
-  if (!begin_lag) {
-    previous_button_timer = button_timer;
-  }
-
-  if (button_timer - previous_button_timer > 50) {
-    SYSTEM_TOGGLE = 1;
-    begin_lag = 0;
-  } else {
-    SYSTEM_TOGGLE = 0;
-  }
-
-  if (state != "idle") {
-    previous_idle_timer = button_timer;
-  }
-  
-  if (state != "disabled") {
-    if ((button_timer - previous_DHT_timer) >= 10000) {
-      read_DHT11(&sys_temperature, &sys_humidity);
-      previous_DHT_timer = button_timer;
-    }
-
-    if ((button_timer - previous_water_timer) >= 10000) {
-      water_level = read_water_level();
-      previous_water_timer = button_timer;
-    }
-  }
-
-  // vent position should be adjustable in all positions except error and disabled
-  // (according to state diagram and state descriptions)
-  if (state == "running" || state == "idle") {
-    read_pot_write_servo(myservo);
-    write_data_to_lcd();
-  }
-
-  Serial.print(water_threshold);
-  Serial.print(" ");
-  Serial.println(water_level);
 
   // handle state transitions
   if (state == "disabled") {
@@ -480,6 +457,7 @@ void loop() {
     write_error_to_lcd();
     
     if (SYSTEM_TOGGLE && water_level >= water_threshold) {
+      SYSTEM_TOGGLE = 0;
       state = "idle";
       return;
     } else if (SYSTEM_TOGGLE) {
@@ -487,18 +465,47 @@ void loop() {
       return;
     }
   }
+
+  if (state != "idle") {
+    previous_idle_timer = button_timer;
+  }
+  
+  // update water sensor and temp/humidity
+  if (state != "disabled") {
+    if ((button_timer - previous_DHT_timer) >= 10000) {
+      read_DHT11(&sys_temperature, &sys_humidity);
+      previous_DHT_timer = button_timer;
+    }
+
+    if ((button_timer - previous_water_timer) >= 10000) {
+      water_level = read_water_level();
+      previous_water_timer = button_timer;
+    }
+  }
+
+  // vent position should be adjustable in all positions except error and disabled
+  // (according to state diagram and state descriptions)
+  if (state == "running" || state == "idle") {
+    read_pot_write_stepper(myStepper);
+    write_data_to_lcd();
+  }
 }
 
 // read the potentiometer and write the value to the servo
-void read_pot_write_servo(Servo &myservo) {
+void read_pot_write_stepper(Stepper &myStepper) {
   prev_potval = potval;
   // read potentiometer from A0
   potval = adc_read(potpin, false);
   // map value from potentiometer to range of servo values
-  potval = max(0, potval);
-  potval = map(potval, 0, 930, 0, 179);
-  myservo.write(potval);
-  delay(15);
+  if (potval > prev_potval + 25) {
+    myStepper.step(potval - prev_potval);
+    prev_potval = potval;
+  }
+  
+  if (potval + 25 < prev_potval) {
+    myStepper.step(-(prev_potval - potval));
+    prev_potval = potval;
+  }
 }
 
 unsigned int read_water_level() {
@@ -541,20 +548,20 @@ void write_data_to_lcd()
   lcd.setCursor(0, 0);
   lcd.print("Temp: ");
   lcd.print(sys_temperature);
-  lcd.print(" C");
+  lcd.print(" C      ");
   lcd.setCursor(0, 1);
   lcd.print("Humidity: ");
   lcd.print(sys_humidity);
-  lcd.print("%");
+  lcd.print("%        ");
 }
 
 // Output error to LCD display
 void write_error_to_lcd()
 {
   lcd.setCursor(0, 0);
-  lcd.print("Water level");
+  lcd.print("Water level     ");
   lcd.setCursor(0, 1);
-  lcd.print("is too low");
+  lcd.print("is too low      ");
 }
 
 void write_led(int i)
