@@ -20,7 +20,7 @@ const int d5 = 23, d6 = 26, d7 = 27;
 LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
 
 // initialize DHT11
-byte sys_temperature = 0;
+byte sys_temperature = 100;
 byte sys_humidity    = 0;
 int pinDHT11 = 6; // digital pin 6 for object initialisation
 SimpleDHT11 dht11(pinDHT11);
@@ -321,11 +321,9 @@ void initialize_buttons()
   *ddr_b &= 0b10011111;
 }
 
-unsigned int DHT_timer = 0;
-unsigned int previous_DHT_timer = 0;
+unsigned long previous_DHT_timer = 0;
+unsigned long previous_water_timer = 0;
 
-unsigned int water_timer = 0;
-unsigned int previous_water_timer = 0;
 void setup() {
   // set columns and rows
   lcd.begin(16, 2);
@@ -341,6 +339,7 @@ void setup() {
 
   // ensure the fan starts as off
   turn_fan_off();
+  read_DHT11(&sys_temperature, &sys_humidity);
 
   *ddr_b &= 0b10011111; // enable pullup
   *port_b |= 0b01100000;
@@ -357,12 +356,10 @@ char *previous_state = "disabled";
 char *state = "disabled";
 unsigned int water_level = 0, water_threshold = 130;
 unsigned int temp_threshold = 20;
+volatile unsigned long button_timer, previous_button_timer;
 unsigned long idle_timer, previous_idle_timer;
+volatile bool begin_lag = 0;
 void loop() {
-  // todo: report each state transition with timestamp and any changes to stepper motor position
-  // todo: read humidity/temp once per minute
-  // todo: 
-
   // report timestamp and motor position
   if (previous_state != state) {
     serialPrintDateTime(rtc);
@@ -380,22 +377,36 @@ void loop() {
       serialPrintInt(potval);
       U0putchar('\n');
     }
+
     previous_state = state;
   }
 
-  DHT_timer = millis();
-  water_timer = millis();
-  // idle_timer = millis();
+  button_timer = millis();
+
+  if (!begin_lag) {
+    previous_button_timer = button_timer;
+  }
+
+  if (button_timer - previous_button_timer > 50) {
+    SYSTEM_TOGGLE = 1;
+    begin_lag = 0;
+  } else {
+    SYSTEM_TOGGLE = 0;
+  }
+
+  if (state != "idle") {
+    previous_idle_timer = button_timer;
+  }
   
   if (state != "disabled") {
-    if ((DHT_timer - previous_DHT_timer) >= 10000) {
+    if ((button_timer - previous_DHT_timer) >= 10000) {
       read_DHT11(&sys_temperature, &sys_humidity);
-      previous_DHT_timer = DHT_timer;
+      previous_DHT_timer = button_timer;
     }
 
-    if ((water_timer - previous_water_timer) >= 10000) {
+    if ((button_timer - previous_water_timer) >= 10000) {
       water_level = read_water_level();
-      previous_water_timer = water_timer;
+      previous_water_timer = button_timer;
     }
   }
 
@@ -404,8 +415,11 @@ void loop() {
   if (state == "running" || state == "idle") {
     read_pot_write_servo(myservo);
     write_data_to_lcd();
-
   }
+
+  Serial.print(water_threshold);
+  Serial.print(" ");
+  Serial.println(water_level);
 
   // handle state transitions
   if (state == "disabled") {
@@ -420,19 +434,20 @@ void loop() {
     write_led(1); // green
 
     // go back to disabled on stop
-    if (!SYSTEM_TOGGLE) {
+    if (SYSTEM_TOGGLE && (button_timer - previous_idle_timer > 200)) {
       state = "disabled";
       return;
     }
 
+    
     // go to error on low water levels
-    if (water_level < water_threshold) {
+    if (water_level < water_threshold && (button_timer - previous_idle_timer > 1500)) {
       state = "error";
       return;
     }
 
     // go to running on hot temperature
-    if (sys_temperature > temp_threshold) {
+    if (sys_temperature > temp_threshold && (button_timer - previous_idle_timer > 2000)) {
       state = "running";
       return;
     }
@@ -441,7 +456,7 @@ void loop() {
     turn_fan_on();
 
     // go to disabled on stop
-    if (!SYSTEM_TOGGLE) {
+    if (SYSTEM_TOGGLE) {
       state = "disabled";
       turn_fan_off();
     }
@@ -457,16 +472,17 @@ void loop() {
     if (sys_temperature <= temp_threshold) {
       state = "idle";
       turn_fan_off();
+
       return;
     }
   } else if (state == "error") {
     write_led(3); // red
     write_error_to_lcd();
     
-    if (!SYSTEM_TOGGLE && water_level >= water_threshold) {
+    if (SYSTEM_TOGGLE && water_level >= water_threshold) {
       state = "idle";
       return;
-    } else if (!SYSTEM_TOGGLE) {
+    } else if (SYSTEM_TOGGLE) {
       state = "disabled";
       return;
     }
@@ -578,6 +594,7 @@ ISR(PCINT0_vect)
 {
   current_button_state = (*(port_b - 2) & 0x20) >> 5;
   if (current_button_state) {
-    SYSTEM_TOGGLE = !SYSTEM_TOGGLE;
+    previous_button_timer = button_timer;
+    begin_lag = 1;
   }
 }
