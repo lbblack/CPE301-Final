@@ -1,20 +1,21 @@
 // Lucas Black
 // Swamp cooler system
 
-// Stepper library
 #include <Stepper.h>
-const int stepsPerRevolution = 64;
-Stepper myStepper(stepsPerRevolution, 34, 38, 35, 39);
-
-// RTC library
-#include "Wire.h"
-#include "RTClib.h"
-
-// Humidity/temperature library
+#include <Wire.h>
+#include <RTClib.h>
 #include <SimpleDHT.h>
-
-// LCD library
 #include <LiquidCrystal.h>
+
+#define RDA 0x80
+#define TBE 0x20
+
+/*    PINS/OBJECTS   */
+/*********************/
+
+// Stepper motor
+const int stepsPerRevolution = 64;
+Stepper stepper(stepsPerRevolution, 34, 38, 35, 39);
 
 // initialize the LCD (digital pins)
 const int rs = 30, en = 31, d4 = 22;
@@ -24,15 +25,13 @@ LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
 // initialize DHT11
 byte sys_temperature = 100;
 byte sys_humidity    = 0;
-int pinDHT11 = 6; // digital pin 6 for object initialisation
-SimpleDHT11 dht11(pinDHT11);
-
-#define RDA 0x80
-#define TBE 0x20
+SimpleDHT11 dht11(6);
 
 // RTC module
 RTC_DS1307 rtc;
-char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+char weekdays[7][12] = {
+  "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"
+};
 
 // potentiometer pin
 int potpin = 8; // A8
@@ -54,6 +53,9 @@ int push_starp = 5; // PB5 (On/off button)
 
 // variables for button input
 volatile bool SYSTEM_TOGGLE = false; // Start/stop
+
+/*    UART    */
+/**************/
 
 // Define UART Register Pointers
 volatile unsigned char *myUCSR0A = (unsigned char *)0x00C0;
@@ -135,7 +137,7 @@ void serialPrintDateTime(RTC_DS1307 &rtc)
   serialPrint("/");
   serialPrintInt(now.year());
   serialPrint(" (");
-  serialPrint(daysOfTheWeek[now.dayOfTheWeek()]);
+  serialPrint(weekdays[now.dayOfTheWeek()]);
   serialPrint(") ");
   serialPrintInt(now.hour());
   serialPrint(":");
@@ -144,38 +146,8 @@ void serialPrintDateTime(RTC_DS1307 &rtc)
   serialPrintInt(now.second());
 }
 
-// Define Timer Register Pointers
-volatile unsigned char *myTCCR1A = (unsigned char *) 0x80;
-volatile unsigned char *myTCCR1B = (unsigned char *) 0x81;
-volatile unsigned char *myTCCR1C = (unsigned char *) 0x82;
-volatile unsigned char *myTIMSK1 = (unsigned char *) 0x6F;
-volatile unsigned int  *myTCNT1  = (unsigned  int *) 0x84;
-volatile unsigned char *myTIFR1 =  (unsigned char *) 0x36;
-
-// todo: modify this
-void timerDelay(double period)
-{
-  // double period = 1.0/(double)freq;
-  // 50% duty cycle
-  // double half_period = period/ 2.0f;
-  // clock period def
-  double clk_period = 0.0000000625;
-  // calc ticks
-  unsigned int ticks = period / clk_period;
-  // stop the timer
-  *myTCCR1B &= 0xF8;
-  // set the counts
-  *myTCNT1 = (unsigned int) (65536 - ticks);
-  // start the timer
-  *myTCCR1B |= 0b00000011;
-  // wait for overflow
-  while((*myTIFR1 & 0x01)==0); // 0b 0000 0000
-  // stop the timer
-  *myTCCR1B &= 0xF8;   // 0b 0000 0000
-  // reset TOV           
-  *myTIFR1 |= 0x01;
-}
-
+/*    ADC    */
+/**************/
 
 // Define ADC Register pointers
 volatile unsigned char* my_ADMUX = (unsigned char*) 0x7C;
@@ -229,6 +201,9 @@ unsigned int adc_read(unsigned char adc_channel_num, bool prescale)
   return *my_ADC_DATA;
 }
 
+/*    GPIO    */
+/**************/
+
 // Define Port B Register Pointers
 volatile unsigned char* port_b = (unsigned char*) 0x25;
 volatile unsigned char* ddr_b  = (unsigned char*) 0x24;
@@ -269,6 +244,27 @@ volatile unsigned char read_port(volatile unsigned char* port, unsigned char pin
   return *port & (0x01 << pin_num);
 }
 
+/*    MAIN SETUP   */
+/*******************/
+
+// for checking when a button has been pressed
+volatile unsigned long button_timer = 0, previous_button_timer = 0;
+volatile unsigned int current_button_state = 0;
+volatile bool begin_lag = 0;
+
+// for updating the water and DHT sensor
+unsigned long previous_DHT_timer = 0;
+unsigned long previous_water_timer = 0;
+unsigned long idle_timer = 0, previous_idle_timer = 0;
+
+// for keeping track of state
+char *previous_state = "disabled";
+char *state = "disabled";
+
+// system constants
+unsigned int water_level = 0, water_threshold = 130;
+unsigned int temp_threshold = 75;
+
 // setup the RTC module
 void initialize_serial_and_rtc()
 {
@@ -301,7 +297,7 @@ void initialize_fan()
 void initialize_servo()
 {
   // set servo output
-  myStepper.setSpeed(200);
+  stepper.setSpeed(200);
 }
 
 void initialize_leds()
@@ -319,13 +315,12 @@ void initialize_buttons()
   *ddr_b &= 0b10011111;
 }
 
-unsigned long previous_DHT_timer = 0;
-unsigned long previous_water_timer = 0;
 
 void setup() {
   // set columns and rows
   lcd.begin(16, 2);
   
+  // setup all components
   initialize_serial_and_rtc();
   initialize_fan();
   initialize_servo();
@@ -337,26 +332,16 @@ void setup() {
 
   // ensure the fan starts as off
   turn_fan_off();
-  read_DHT11(&sys_temperature, &sys_humidity);
 
   *ddr_b &= 0b10011111; // enable pullup
   *port_b |= 0b01100000;
 
   PCICR |= B00000001; // Enable interrupts on PB & PC
   PCMSK0 |= B01100000; // Trigger interrupts on pins D11 and D12
-  EICRA |= B00000011;
+  EICRA |= B00000011; // Trigger on rising edge?
 }
 
-// volatile unsigned int presses = 0;
-volatile unsigned int current_button_state = 0;
 
-char *previous_state = "disabled";
-char *state = "disabled";
-unsigned int water_level = 0, water_threshold = 130;
-unsigned int temp_threshold = 20;
-volatile unsigned long button_timer, previous_button_timer;
-unsigned long idle_timer, previous_idle_timer;
-volatile bool begin_lag = 0;
 void loop() {
   button_timer = millis();
 
@@ -364,6 +349,7 @@ void loop() {
     previous_button_timer = button_timer;
   }
 
+  // check button press
   if (button_timer - previous_button_timer > 50) {
     SYSTEM_TOGGLE = 1;
     begin_lag = 0;
@@ -385,14 +371,14 @@ void loop() {
     if (prev_potval != potval) {
       // print change to vent position
       serialPrint("Vent position: ");
-      serialPrintInt(potval);
+      serialPrintInt(map(potval, 0, 1024, 0, 180));
+      serialPrint("°");
       U0putchar('\n');
     }
 
+    // ensure no funky state transitions on error -> disabled
     if (state == "disabled" && previous_state == "error") {
-      SYSTEM_TOGGLE = 0;      
-    } else if (state == "idle" && previous_state == "disabled") {
-      water_level = read_water_level();
+      SYSTEM_TOGGLE = 0;
     }
 
     previous_state = state;
@@ -466,6 +452,7 @@ void loop() {
     }
   }
 
+  // buffer timer for idle state
   if (state != "idle") {
     previous_idle_timer = button_timer;
   }
@@ -486,30 +473,47 @@ void loop() {
   // vent position should be adjustable in all positions except error and disabled
   // (according to state diagram and state descriptions)
   if (state == "running" || state == "idle") {
-    read_pot_write_stepper(myStepper);
     write_data_to_lcd();
+    read_pot_write_stepper(stepper);
   }
 }
 
-// read the potentiometer and write the value to the servo
-void read_pot_write_stepper(Stepper &myStepper) {
+/*    UPDATE METHODS   */
+/***********************/
+
+// read water sensor
+unsigned int read_water_level() {
+  return adc_read(1, true);
+}
+
+// read the potentiometer and write the value to the stepper
+void read_pot_write_stepper(Stepper &stepper) {
   prev_potval = potval;
-  // read potentiometer from A0
+  // read potentiometer from A8
   potval = adc_read(potpin, false);
-  // map value from potentiometer to range of servo values
+
+  // map value from potentiometer to range of stepper values
   if (potval > prev_potval + 25) {
-    myStepper.step(potval - prev_potval);
+    stepper.step(potval - prev_potval);
     prev_potval = potval;
   }
   
   if (potval + 25 < prev_potval) {
-    myStepper.step(-(prev_potval - potval));
+    stepper.step(-(prev_potval - potval));
     prev_potval = potval;
   }
 }
 
-unsigned int read_water_level() {
-  return adc_read(1, true);
+// Read the temperature/humidity sensor
+void read_DHT11(byte *temperature, byte *humidity)
+{
+  byte temp = 0, hum = 0;
+  int err = SimpleDHTErrSuccess;
+  if ((err = dht11.read(&temp, &hum, NULL)) != SimpleDHTErrSuccess) {
+    return;
+  }
+  *temperature = (temp * 9 / 5) + 32;
+  *humidity = hum;
 }
 
 void turn_fan_on()
@@ -530,25 +534,13 @@ void turn_fan_off()
   write_port(port_e, fan_input2, LOW);
 }
 
-// Read the temperature/humidity sensor
-void read_DHT11(byte *temperature, byte *humidity)
-{
-  byte temp = 0, hum = 0;
-  int err = SimpleDHTErrSuccess;
-  if ((err = dht11.read(&temp, &hum, NULL)) != SimpleDHTErrSuccess) {
-    return;
-  }
-  *temperature = temp;
-  *humidity = hum;
-}
-
 // Output current air temperature/humidity to LCD display
 void write_data_to_lcd()
 {
   lcd.setCursor(0, 0);
   lcd.print("Temp: ");
   lcd.print(sys_temperature);
-  lcd.print(" C      ");
+  lcd.print(" F      ");
   lcd.setCursor(0, 1);
   lcd.print("Humidity: ");
   lcd.print(sys_humidity);
@@ -561,7 +553,7 @@ void write_error_to_lcd()
   lcd.setCursor(0, 0);
   lcd.print("Water level     ");
   lcd.setCursor(0, 1);
-  lcd.print("is too low      ");
+  lcd.print("is too low!      ");
 }
 
 void write_led(int i)
@@ -597,6 +589,7 @@ void write_led(int i)
   }
 }
 
+// Interrupt for button presses
 ISR(PCINT0_vect)
 {
   current_button_state = (*(port_b - 2) & 0x20) >> 5;
