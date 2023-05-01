@@ -239,11 +239,6 @@ void write_port(volatile unsigned char* port, unsigned char pin_num, unsigned ch
   }
 }
 
-volatile unsigned char read_port(volatile unsigned char* port, unsigned char pin_num)
-{
-  return *port & (0x01 << pin_num);
-}
-
 /*    MAIN SETUP   */
 /*******************/
 
