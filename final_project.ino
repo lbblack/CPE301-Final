@@ -52,12 +52,10 @@ int blue_led = 6;   // PH6 (RUNNING)
 int red_led = 4;    // PB4 (ERROR)
 
 // push buttons
-int push_reset = 3; // PC3 (Reset button)
-int push_starp = 2; // PC2 (On/off button)
+int push_starp = 5; // PB5 (On/off button)
 
 // variables for button input
-bool IS_RESET = false;
-bool IS_STARP = false; // Start/stop
+volatile bool SYSTEM_TOGGLE = false; // Start/stop
 
 // Define UART Register Pointers
 volatile unsigned char *myUCSR0A = (unsigned char *)0x00C0;
@@ -146,7 +144,6 @@ void serialPrintDateTime(RTC_DS1307 &rtc)
   serialPrintInt(now.minute());
   serialPrint(":");
   serialPrintInt(now.second());
-  U0putchar('\n');
 }
 
 // Define Timer Register Pointers
@@ -324,6 +321,158 @@ void initialize_buttons()
   *ddr_b &= 0b10011111;
 }
 
+unsigned int DHT_timer = 0;
+unsigned int previous_DHT_timer = 0;
+
+unsigned int water_timer = 0;
+unsigned int previous_water_timer = 0;
+void setup() {
+  // set columns and rows
+  lcd.begin(16, 2);
+  
+  initialize_serial_and_rtc();
+  initialize_fan();
+  initialize_servo();
+  initialize_leds();
+  initialize_buttons();
+
+  // setup the ADC
+  adc_init();
+
+  // ensure the fan starts as off
+  turn_fan_off();
+
+  *ddr_b &= 0b10011111; // enable pullup
+  *port_b |= 0b01100000;
+
+  PCICR |= B00000001; // Enable interrupts on PB & PC
+  PCMSK0 |= B01100000; // Trigger interrupts on pins D11 and D12
+  EICRA |= B00000011;
+}
+
+// volatile unsigned int presses = 0;
+volatile unsigned int current_button_state = 0;
+
+char *previous_state = "disabled";
+char *state = "disabled";
+unsigned int water_level = 0, water_threshold = 130;
+unsigned int temp_threshold = 20;
+unsigned long idle_timer, previous_idle_timer;
+void loop() {
+  // todo: report each state transition with timestamp and any changes to stepper motor position
+  // todo: read humidity/temp once per minute
+  // todo: 
+
+  // report timestamp and motor position
+  if (previous_state != state) {
+    serialPrintDateTime(rtc);
+    serialPrint(" ( ");
+    serialPrint(previous_state);
+    serialPrint(" -> ");
+    serialPrint(state);
+    serialPrint(" )");
+    U0putchar('\n');
+
+    lcd.clear();
+    if (prev_potval != potval) {
+      // print change to vent position
+      serialPrint("Vent position: ");
+      serialPrintInt(potval);
+      U0putchar('\n');
+    }
+    previous_state = state;
+  }
+
+  DHT_timer = millis();
+  water_timer = millis();
+  // idle_timer = millis();
+  
+  if (state != "disabled") {
+    if ((DHT_timer - previous_DHT_timer) >= 10000) {
+      read_DHT11(&sys_temperature, &sys_humidity);
+      previous_DHT_timer = DHT_timer;
+    }
+
+    if ((water_timer - previous_water_timer) >= 10000) {
+      water_level = read_water_level();
+      previous_water_timer = water_timer;
+    }
+  }
+
+  // vent position should be adjustable in all positions except error and disabled
+  // (according to state diagram and state descriptions)
+  if (state == "running" || state == "idle") {
+    read_pot_write_servo(myservo);
+    write_data_to_lcd();
+
+  }
+
+  // handle state transitions
+  if (state == "disabled") {
+    write_led(0); // yellow
+
+    // transition on start button
+    if (SYSTEM_TOGGLE) {
+      state = "idle";
+      return;
+    }
+  } else if (state == "idle") {
+    write_led(1); // green
+
+    // go back to disabled on stop
+    if (!SYSTEM_TOGGLE) {
+      state = "disabled";
+      return;
+    }
+
+    // go to error on low water levels
+    if (water_level < water_threshold) {
+      state = "error";
+      return;
+    }
+
+    // go to running on hot temperature
+    if (sys_temperature > temp_threshold) {
+      state = "running";
+      return;
+    }
+  } else if (state == "running") {
+    write_led(2); // blue
+    turn_fan_on();
+
+    // go to disabled on stop
+    if (!SYSTEM_TOGGLE) {
+      state = "disabled";
+      turn_fan_off();
+    }
+
+    // go to error on low water levels
+    if (water_level < water_threshold) {
+      state = "error";
+      turn_fan_off();
+      return;
+    }
+
+    // go back to idle on lower temperatures
+    if (sys_temperature <= temp_threshold) {
+      state = "idle";
+      turn_fan_off();
+      return;
+    }
+  } else if (state == "error") {
+    write_led(3); // red
+    write_error_to_lcd();
+    
+    if (!SYSTEM_TOGGLE && water_level >= water_threshold) {
+      state = "idle";
+      return;
+    } else if (!SYSTEM_TOGGLE) {
+      state = "disabled";
+      return;
+    }
+  }
+}
+
 // read the potentiometer and write the value to the servo
 void read_pot_write_servo(Servo &myservo) {
   prev_potval = potval;
@@ -334,13 +483,6 @@ void read_pot_write_servo(Servo &myservo) {
   potval = map(potval, 0, 930, 0, 179);
   myservo.write(potval);
   delay(15);
-
-  if (prev_potval != potval) {
-    // print change to vent position
-    serialPrint("Vent position: ");
-    serialPrintInt(potval);
-    U0putchar('\n');
-  }
 }
 
 unsigned int read_water_level() {
@@ -356,6 +498,15 @@ void turn_fan_on()
   write_port(port_e, fan_input2, HIGH);
 }
 
+void turn_fan_off()
+{
+  // set motor speed to max
+  write_port(port_g, fan_enable, LOW);
+  // spin motor in one direction
+  write_port(port_e, fan_input1, LOW);
+  write_port(port_e, fan_input2, LOW);
+}
+
 // Read the temperature/humidity sensor
 void read_DHT11(byte *temperature, byte *humidity)
 {
@@ -369,9 +520,8 @@ void read_DHT11(byte *temperature, byte *humidity)
 }
 
 // Output current air temperature/humidity to LCD display
-void write_to_lcd()
+void write_data_to_lcd()
 {
-  read_DHT11(&sys_temperature, &sys_humidity);
   lcd.setCursor(0, 0);
   lcd.print("Temp: ");
   lcd.print(sys_temperature);
@@ -380,6 +530,15 @@ void write_to_lcd()
   lcd.print("Humidity: ");
   lcd.print(sys_humidity);
   lcd.print("%");
+}
+
+// Output error to LCD display
+void write_error_to_lcd()
+{
+  lcd.setCursor(0, 0);
+  lcd.print("Water level");
+  lcd.setCursor(0, 1);
+  lcd.print("is too low");
 }
 
 void write_led(int i)
@@ -415,55 +574,10 @@ void write_led(int i)
   }
 }
 
-void setup() {
-  // set columns and rows
-  lcd.begin(16, 2);
-  
-  initialize_serial_and_rtc();
-  initialize_fan();
-  initialize_servo();
-  initialize_leds();
-  initialize_buttons();
-
-  // setup the ADC
-  adc_init();
-
-  *ddr_b &= 0b10011111;
-  *port_b |= 0b01100000;
-
-  PCICR |= B00000001; // Enable interrupts on PB
-  PCMSK0 |= B110000; // Trigger interrupts on pins D11 and D12
-}
-
-unsigned int presses = 0;
-void loop() {
-  
-  // U0putchar('\n');
-
-  // Serial.println(adc_read(2));
-  // Serial.println(analogRead(1));
-
-  // turn_fan_on();
-
-  // write_to_lcd();
-  // write_led(3);
-
-  read_pot_write_servo(myservo);
-  // delay(20);
-  serialPrintInt(read_water_level());
-  U0putchar('\n');
-  // Serial.println(presses);
-  
-  // delay (change this)
-  delay(1000);
-}
-
 ISR(PCINT0_vect)
 {
-  if (presses % 2 == 0) {
-    IS_STARP = 0;
-  } else {
-    IS_STARP = 1;
+  current_button_state = (*(port_b - 2) & 0x20) >> 5;
+  if (current_button_state) {
+    SYSTEM_TOGGLE = !SYSTEM_TOGGLE;
   }
-  presses++;
 }
